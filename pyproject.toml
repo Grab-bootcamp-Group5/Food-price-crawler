@@ -1,0 +1,25 @@
+[project]
+name = "foodprice-crawler"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Thanh Bui",email = "richardbui26k4@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.10.12"
+dependencies = [
+    "playwright (==1.*)",
+    "aiofiles (>=24.1.0,<25.0.0)",
+    "async-timeout (>=5.0.1,<6.0.0)",
+    "sqlalchemy (>=2.0.40,<3.0.0)",
+    "aiosqlite (>=0.21.0,<0.22.0)",
+    "pydantic (>=2.11.3,<3.0.0)",
+    "rich (>=14.0.0,<15.0.0)",
+    "pytest (>=8.3.5,<9.0.0)",
+    "pytest-asyncio (>=0.26.0,<0.27.0)"
+]
+
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
