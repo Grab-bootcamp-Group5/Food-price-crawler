@@ -5,11 +5,21 @@ from datetime import datetime
 
 Base = declarative_base()
 
-class Price(Base):
-    __tablename__ = "product_price"
+class ProductPrice(Base):
+    __tablename__ = "products"
+
     store = Column(String, primary_key=True)
     sku = Column(String, primary_key=True)
+    name = Column(String)
+    unit = Column(String)
     price = Column(Float, nullable=False)
+    discount = Column(Float, default=0)
+    promotion = Column(String)
+    image = Column(String)
+    link = Column(String)
+    excerpt = Column(String)
+    date_begin = Column(DateTime, nullable=True)
+    date_end = Column(DateTime, nullable=True)
     ts = Column(DateTime, default=datetime.utcnow)
 
 class StoreBranch(Base):

@@ -11,3 +11,8 @@ class BranchCrawler(ABC):
             district, ward, lat, lon
         }"""
         pass
+    async def crawl_prices(self) -> List[Dict]:
+        """Return list of dicts: {
+            id, chain, sku, price
+        }"""
+        pass
