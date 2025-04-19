@@ -45,17 +45,18 @@ class CoopOnlineCrawler(BranchCrawler):
             await self.browser.close()
 
     # --- PRODUCT CRAWLING ---
-    async def fetch_products_by_page(self, page_number=1):
-        print(f"Fetching products for store {self.store_id} page {page_number}...")
-        
-        # Print local storage for debugging
-        local_storage = await self.page.evaluate("() => JSON.stringify(localStorage)")
-        print(f"Local Storage: {local_storage}")
+    async def fetch_products_by_page(self, category_url: str, page_number: int = 1) -> List[dict]:
+        print(f"[Info] Fetching category: {category_url} | store={self.store_id} | page={page_number}")
+
+        # Phải load trang danh mục để browser context có JS và cookies đúng
+        await self.page.goto(category_url)
+
+        # Dùng browser context để gọi fetch như browser thực sự
         response = await self.page.evaluate(
-            """async ({ store_id, page }) => {
+            """async () => {
                 const formData = new URLSearchParams();
 
-                const res = await fetch("https://cooponline.vn/groups/rau-cu-trai-cay/", {
+                const res = await fetch("", {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
@@ -63,47 +64,37 @@ class CoopOnlineCrawler(BranchCrawler):
                     body: formData
                 });
 
-                return await res.text();
-            }""",
-            {"store_id": self.store_id, "page": str(page_number)}
+                return await res.text(); // HTML
+            }"""
         )
+
         if not response:
-            print(f"Failed to fetch products for store {self.store_id} page {page_number}")
+            print(f"[Error] Empty response for store {self.store_id} page {page_number}")
             return []
-        # print(response)
+
+        # Parse từ response HTML, không từ self.page.content()
         soup = BeautifulSoup(response, "html.parser")
-        products = []
         tag = soup.find("module-taxonomy")
         if not tag:
-            return None
+            print("[Error] module-taxonomy not found in response HTML")
+            return []
 
         taxonomy = tag.get("taxonomy")
         term_id = tag.get("term_id")
         items_raw = tag.get("items")
-        try:
-            items = json.loads(items_raw) if items_raw else []
-        except:
-            items = [i.strip() for i in items_raw.split(",") if i.strip().isdigit()]
-        # Fetch products by taxonomy
-        products = await self.fetch_products_by_taxonomy(term_id, taxonomy, self.store_id, items)
-        print(f"Total products: {len(products)}")
-        # for item in soup.select(".product-item"):
-        #     title = item.select_one(".product-title")
-        #     price = item.select_one(".price")
-        #     unit = item.select_one(".product-unit")
-        #     sku = item.get("data-id") or ""
-        #     href = item.select_one("a")
-        #     products.append({
-        #         "store": self.store_id,
-        #         "title": title.text.strip() if title else None,
-        #         "price": self._parse_price(price.text if price else "0"),
-        #         "unit": unit.text.strip() if unit else None,
-        #         "sku": sku,
-        #         "url": f"https://cooponline.vn{href['href']}" if href else None,
-        #         "crawled_at": datetime.utcnow().isoformat()
-        #     })
+        # print(f"[Info] Taxonomy: {taxonomy}, Term ID: {term_id}, Items: {items_raw}")
+        if not (taxonomy and term_id and items_raw):
+            print(f"[Error] Missing taxonomy info: {taxonomy}, {term_id}, {items_raw}")
+            return []
 
-        return products
+        try:
+            items = json.loads(items_raw)
+        except Exception:
+            items = [i.strip() for i in items_raw.split(",") if i.strip().isdigit()]
+
+        return await self.fetch_products_by_taxonomy(term_id, taxonomy, self.store_id, items)
+
+
     async def fetch_products_by_taxonomy(self, termid: str, taxonomy: str, store: str, items: List[str]) -> List[dict]:
         all_products = []
         page_number = 1
@@ -309,16 +300,41 @@ class CoopOnlineCrawler(BranchCrawler):
                             store_map[key] = store
             await browser.close()
             return list(store_map.values())
+    async def fetch_categories(self) -> List[Dict]:
+        # Fetch html from the page
+        html = await self.page.content()
+        soup = BeautifulSoup(html, "html.parser")
+        categories = []
+        # Fetch categories by extract from div container-mega then ul megamenu with li class item-vertical with-sub-menu hover
+        category_items = soup.select("li.item-vertical.with-sub-menu.hover")
 
+        for li in category_items:
+            title = li.select_one("a span")  # Lấy tên danh mục chính
+            href = li.select_one("a")["href"] if li.select_one("a") else None
+            # print(f"Category: {title.text.strip() if title else 'N/A'}")
+            # print(f"Link: {href}")
+            categories.append({
+                "title": title.text.strip() if title else None,
+                "link": href
+            })
+        return categories
     async def crawl_prices(self) -> List[Dict]:
         store_ids = await self.get_store_ids_from_db()
         print(f"Found {len(store_ids)} store IDs in the database.")
         crawler = CoopOnlineCrawler(store_id=571)
         try:
             await crawler.init()
-            products = await crawler.fetch_products_by_page(1)
-            print(f"{self.store_id}: {len(products)} products")
-            return products
+
+            categories = await crawler.fetch_categories()
+            all_products_in_store = []
+            for category in categories:
+                print(f"Category: {category['title']}, Link: {category['link']}")
+
+                products = await crawler.fetch_products_by_page(category["link"])
+                print(f"{self.store_id}: {len(products)} products")
+                all_products_in_store.extend(products)
+
+            return all_products_in_store
         except Exception as e:
             print(f"Failed for store {self.store_id}:", e)
         finally:
