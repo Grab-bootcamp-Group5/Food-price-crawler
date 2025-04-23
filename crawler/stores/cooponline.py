@@ -15,6 +15,27 @@ from pathlib import Path
 import re
 import unicodedata
 
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+
+tokenizer_vi2en = AutoTokenizer.from_pretrained(
+    "vinai/vinai-translate-vi2en-v2",
+    use_fast=False,
+    src_lang="vi_VN",     
+    tgt_lang="en_XX"      
+)
+model_vi2en = AutoModelForSeq2SeqLM.from_pretrained("vinai/vinai-translate-vi2en-v2")
+
+def translate_vi2en(vi_text: str) -> str:
+    inputs = tokenizer_vi2en(vi_text, return_tensors="pt")
+    decoder_start_token_id = tokenizer_vi2en.lang_code_to_id["en_XX"]
+    outputs = model_vi2en.generate(
+        **inputs,
+        decoder_start_token_id=decoder_start_token_id,
+        num_beams=5,
+        early_stopping=True
+    )
+    return tokenizer_vi2en.decode(outputs[0], skip_special_tokens=True)
+
 class CoopOnlineCrawler(BranchCrawler):
     chain = "cooponline"
 
@@ -92,10 +113,10 @@ class CoopOnlineCrawler(BranchCrawler):
         except Exception:
             items = [i.strip() for i in items_raw.split(",") if i.strip().isdigit()]
 
-        return await self.fetch_products_by_taxonomy(term_id, taxonomy, self.store_id, items)
+        return await self.fetch_products_by_taxonomy(term_id, taxonomy, self.store_id, category_url, items)
 
 
-    async def fetch_products_by_taxonomy(self, termid: str, taxonomy: str, store: str, items: List[str]) -> List[dict]:
+    async def fetch_products_by_taxonomy(self, termid: str, taxonomy: str, store: str, category_url, items: List[str]) -> List[dict]:
         all_products = []
         page_number = 1
 
@@ -140,10 +161,14 @@ class CoopOnlineCrawler(BranchCrawler):
                 break
             print(f"Fetched {len(products)} products for store {store} page {page_number}")
             for item in products:
+                english_name = translate_vi2en(item.get("name", ""))
+                if not english_name:
+                    print(f"Failed to translate name: {item.get('name', '')}")
+                    continue
                 all_products.append({
                     "sku": item.get("sku"),
                     "name": item.get("name"),
-                    "name_normalized": self._normalize_name(item.get("name", "")),
+                    "name_en": english_name,
                     "unit": item.get("unit"),
                     "price": float(item.get("price", "0")),
                     "discount": float(item.get("discount", "0")),
@@ -153,9 +178,11 @@ class CoopOnlineCrawler(BranchCrawler):
                     "link": item.get("link"),
                     "date_begin": item.get("date_begin"),
                     "date_end": item.get("date_end"),
-                    "store": item.get("store"),
+                    "category": category_url,
+                    "store_id": store,
                     "crawled_at": datetime.utcnow().isoformat()
                 })
+                print(all_products[-1])
             page_number += 1
         print(f"Total products fetched: {len(all_products)}")
         # Save to database
@@ -344,10 +371,10 @@ class CoopOnlineCrawler(BranchCrawler):
         #     try:
         #         await crawler.init()
         #         products = await crawler.fetch_products_by_page(1)
-        #         print(f"✅ {store_id}: {len(products)} products")
+        #         print(f"{store_id}: {len(products)} products")
         #         print(json.dumps(products, indent=2, ensure_ascii=False))
         #     except Exception as e:
-        #         print(f"❌ Failed for store {store_id}:", e)
+        #         print(f"Failed for store {store_id}:", e)
         #     finally:
         #         await crawler.close()
 

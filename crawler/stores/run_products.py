@@ -5,7 +5,6 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
 from db import upsert_product
-from db.models import Session
 
 app = typer.Typer(help="Branch crawler driver")
 

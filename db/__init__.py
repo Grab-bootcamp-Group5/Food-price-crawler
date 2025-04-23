@@ -1,5 +1,5 @@
 from datetime import datetime
-from db.models import Session, ProductPrice, StoreBranch  # cập nhật tùy file của bạn
+from db.mongo_client import product_prices
 
 
 def parse_date_safe(date_str):
@@ -10,39 +10,27 @@ def parse_date_safe(date_str):
     except ValueError:
         return None
 
+
 async def upsert_product(product: dict):
-    async with Session() as session:
-        async with session.begin():
-            rec = await session.get(ProductPrice, (product["store"], product["sku"]))
-            if rec:
-                rec.name = product["name"]
-                rec.unit = product["unit"]
-                rec.price = product["price"]
-                rec.discount = product["discount"]
-                rec.promotion = product["promotion"]
-                rec.image = product["image"]
-                rec.link = product["link"]
-                rec.excerpt = product["excerpt"]
-                rec.date_begin = parse_date_safe(product["date_begin"])
-                rec.date_end = parse_date_safe(product["date_end"])
-                rec.ts = datetime.utcnow()
-            else:
-                new_product = ProductPrice(
-                    store=product["store"],
-                    sku=product["sku"],
-                    name=product["name"],
-                    unit=product["unit"],
-                    price=product["price"],
-                    discount=product["discount"],
-                    promotion=product["promotion"],
-                    image=product["image"],
-                    link=product["link"],
-                    excerpt=product["excerpt"],
-                    date_begin=parse_date_safe(product["date_begin"]),
-                    date_end=parse_date_safe(product["date_end"]),
-                    ts=datetime.utcnow()
-                )
-                session.add(new_product)
+    filter_query = {"store": product["store"], "sku": product["sku"]}
+    update_data = {
+        "$set": {
+            "name": product["name"],
+            "unit": product["unit"],
+            "price": product["price"],
+            "discount": product["discount"],
+            "promotion": product["promotion"],
+            "image": product["image"],
+            "link": product["link"],
+            "excerpt": product["excerpt"],
+            "date_begin": parse_date_safe(product["date_begin"]),
+            "date_end": parse_date_safe(product["date_end"]),
+            "store_id": product["store_id"],
+            "category": product["category"],
+            "ts": datetime.utcnow(),
+        }
+    }
+    await product_prices.update_one(filter_query, update_data, upsert=True)
 
 
 async def upsert_branch(branch_dict: dict):
