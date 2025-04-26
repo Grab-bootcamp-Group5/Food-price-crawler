@@ -17,4 +17,7 @@ poetry run python db/init_db.py
 sqlite3 prices.db
 .tables
 
+poetry run playwright install
+
+
 poetry run python crawler/stores/run_stores.py --domain cooponline

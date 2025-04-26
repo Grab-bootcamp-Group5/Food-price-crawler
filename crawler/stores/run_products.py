@@ -2,6 +2,8 @@ import asyncio, importlib
 import typer
 import sys
 import os
+
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
 from db import upsert_product
@@ -21,18 +23,17 @@ async def async_main(domain: str):
     )
     crawler = crawler_cls(store_id=571)
     products = await crawler.crawl_prices()
-    if not products:
-        print("No prices found.")
-        return
+    # if not products:
+    #     print("No prices found.")
+    #     return
 
-    inserted_count = 0
-    async with Session() as session:
-        async with session.begin():
-            for product in products:
-                await upsert_product(product)
-                inserted_count += 1
+    # inserted_count = 0
+    # for product in products:
+    #     await upsert_product(product)
+    #     inserted_count += 1
 
-    print(f"Inserted/updated {inserted_count} products into DB")
+    print(f"Inserted/updated {inserted_count} products into MongoDB")
+
 
 if __name__ == "__main__":
     app()

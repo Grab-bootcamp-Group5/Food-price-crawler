@@ -11,11 +11,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import text
 from pathlib import Path
-
+import sys
+import os
 import re
 import unicodedata
 
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+import torch
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
+
+from db import upsert_product
+
+torch.set_num_threads(15) 
 
 tokenizer_vi2en = AutoTokenizer.from_pretrained(
     "vinai/vinai-translate-vi2en-v2",
@@ -113,7 +120,12 @@ class CoopOnlineCrawler(BranchCrawler):
         except Exception:
             items = [i.strip() for i in items_raw.split(",") if i.strip().isdigit()]
 
+        if not isinstance(items, list) or len(items) == 0:
+            print(f"[Warning] No valid items found for category {category_url}")
+            return []
+
         return await self.fetch_products_by_taxonomy(term_id, taxonomy, self.store_id, category_url, items)
+
 
 
     async def fetch_products_by_taxonomy(self, termid: str, taxonomy: str, store: str, category_url, items: List[str]) -> List[dict]:
@@ -336,48 +348,97 @@ class CoopOnlineCrawler(BranchCrawler):
         category_items = soup.select("li.item-vertical.with-sub-menu.hover")
 
         for li in category_items:
-            title = li.select_one("a span")  # Lấy tên danh mục chính
-            href = li.select_one("a")["href"] if li.select_one("a") else None
-            # print(f"Category: {title.text.strip() if title else 'N/A'}")
-            # print(f"Link: {href}")
-            categories.append({
-                "title": title.text.strip() if title else None,
-                "link": href
-            })
+            grid_blocks = li.select("div.col-lg-12.col-md-12.col-sm-12")
+            for block in grid_blocks:
+                static_menus = block.select("div.static-menu")
+                for menu in static_menus:
+                    # Lấy thẻ a.main-menu đầu tiên trong menu
+                    a_tag = menu.select_one("a.main-menu")
+                    if a_tag:
+                        categories.append({
+                            "title": a_tag.text.strip(),
+                            "link": a_tag.get("href")
+                        })
         return categories
     async def crawl_prices(self) -> List[Dict]:
         store_ids = await self.get_store_ids_from_db()
         print(f"Found {len(store_ids)} store IDs in the database.")
-        crawler = CoopOnlineCrawler(store_id=571)
-        try:
-            await crawler.init()
+        for store_id in store_ids:
+            crawler = CoopOnlineCrawler(store_id=store_id)
+            try:
+                await crawler.init()
+                categories = await crawler.fetch_categories()
+                valid_titles = set([
+    "Nước rửa rau, củ, quả", "Rau Củ", "Trái cây", "Thịt", "Thủy hải sản", "Trứng",
+    "Bún tươi, bánh canh", "Thức ăn chế biến", "Kem", "Thực phẩm đông lạnh",
+    "Thực phẩm trữ mát", "Bánh", "Hạt, trái cây sấy", "Kẹo", "Mứt, thạch, rong biển",
+    "Snack", "Sản phẩm từ sữa khác", "Sữa các loại", "Sữa chua", "Sữa đặc, sữa bột",
+    "Thức uống có cồn", "Thức uống dinh dưỡng", "Thức uống không cồn", "Dầu ăn",
+    "Đồ hộp", "Gạo, nếp, đậu, bột", "Gia vị nêm", "Lạp xưởng, xúc xích, khô sấy",
+    "Ngũ cốc, bánh ăn sáng", "Nui, mì, bún, bánh tráng", "Nước chấm, mắm các loại",
+    "Thực phẩm ăn liền", "Tương, sốt"
+    # "Gia vị, gạo, thực phẩm khô",
+    # "Rau củ, trái cây", "Sữa, sản phẩm từ sữa", "Thịt, trứng, hải sản",
+    # "Thức ăn chế biến, bún tươi", "Thực phẩm đông, mát", "Thức uống"
+])   
+                categories_mapping = {
+                    'Nước rửa rau, củ, quả': 'Prepared Vegetables',
+                    'Rau Củ': 'Vegetables',
+                    'Trái cây': 'Fresh Fruits',
+                    'Thịt': 'Fresh Meat',
+                    'Thủy hải sản': 'Seafood & Fish Balls',
+                    'Trứng': 'Fresh Meat',
+                    'Bún tươi, bánh canh': 'Instant Foods',
+                    'Thức ăn chế biến': 'Instant Foods',
+                    'Kem': 'Ice Cream & Cheese',
+                    'Thực phẩm đông lạnh': 'Instant Foods',
+                    'Thực phẩm trữ mát': 'Instant Foods',
+                    'Bánh': 'Cakes',
+                    'Hạt, trái cây sấy': 'Dried Fruits',
+                    'Kẹo': 'Candies',
+                    'Mứt, thạch, rong biển': 'Fruit Jam',
+                    'Snack': 'Snacks',
+                    'Sản phẩm từ sữa khác': 'Milk',
+                    'Sữa các loại': 'Milk',
+                    'Sữa chua': 'Yogurt',
+                    'Sữa đặc, sữa bột': 'Milk',
+                    'Thức uống có cồn': 'Alcoholic Beverages',
+                    'Thức uống dinh dưỡng': 'Beverages',
+                    'Thức uống không cồn': 'Beverages',
+                    'Dầu ăn': 'Seasonings',
+                    'Đồ hộp': 'Instant Foods',
+                    'Gạo, nếp, đậu, bột': 'Grains & Staples',
+                    'Gia vị nêm': 'Seasonings',
+                    'Lạp xưởng, xúc xích, khô sấy': 'Cold Cuts: Sausages & Ham',
+                    'Ngũ cốc, bánh ăn sáng': 'Cereals & Grains',
+                    'Nui, mì, bún, bánh tráng': 'Instant Foods',
+                    'Nước chấm, mắm các loại': 'Seasonings',
+                    'Thực phẩm ăn liền': 'Instant Foods',
+                    'Tương, sốt': 'Seasonings',
+                    'Gia vị, gạo, thực phẩm khô': 'Grains & Staples',
+                    'Rau củ, trái cây': 'Vegetables',
+                    'Sữa, sản phẩm từ sữa': 'Milk',
+                    'Thịt, trứng, hải sản': 'Fresh Meat',
+                    'Thức ăn chế biến, bún tươi': 'Instant Foods',
+                    'Thực phẩm đông, mát': 'Instant Foods',
+                    'Thức uống': 'Beverages'
+                    }
 
-            categories = await crawler.fetch_categories()
-            all_products_in_store = []
-            for category in categories:
-                print(f"Category: {category['title']}, Link: {category['link']}")
-
-                products = await crawler.fetch_products_by_page(category["link"])
-                print(f"{self.store_id}: {len(products)} products")
-                all_products_in_store.extend(products)
-
-            return all_products_in_store
-        except Exception as e:
-            print(f"Failed for store {self.store_id}:", e)
-        finally:
-            await crawler.close()
-        # for store_id in store_ids:
-        #     crawler = CoopOnlineCrawler(store_id=store_id)
-        #     try:
-        #         await crawler.init()
-        #         products = await crawler.fetch_products_by_page(1)
-        #         print(f"{store_id}: {len(products)} products")
-        #         print(json.dumps(products, indent=2, ensure_ascii=False))
-        #     except Exception as e:
-        #         print(f"Failed for store {store_id}:", e)
-        #     finally:
-        #         await crawler.close()
-
+                for category in categories:
+                    title = category['title']
+                    if title in valid_titles:
+                        # Mapping category to English
+                        category["title"] = categories_mapping[title]
+                        print(f"Category: {category['title']}, Link: {category['link']}")
+                        products = await crawler.fetch_products_by_page(category["link"])
+                        print(f"{self.store_id}: {len(products)} products")
+                        for product in products:
+                            await upsert_product(product, category["title"])
+                # print(f"{store_id}: {len(products)} products")
+            except Exception as e:
+                print(f"Failed for store {store_id}:", e)
+            finally:
+                await crawler.close()
 
 
 if __name__ == "__main__":
