@@ -15,6 +15,7 @@ def parse_date_safe(date_str):
 meta_client = AsyncIOMotorClient("mongodb://103.172.79.235:27017")
 meta_db = meta_client.metadata_db
 category_shard_meta = meta_db.category_shards
+store_branches = meta_db.store_branches
 
 @lru_cache(maxsize=128)  # cache để tránh mở kết nối lại nhiều lần
 def get_shard_connection(server_uri: str, db_name: str, collection_name: str):
@@ -58,8 +59,18 @@ async def upsert_product(product: dict, category_en: str):
     await collection.update_one(filter_query, update_data, upsert=True)
 
 async def upsert_branch(branch_dict: dict):
+    # Convert lon, lat to GeoJSON format if they exist
+    if "lon" in branch_dict and "lat" in branch_dict:
+        branch_dict["location"] = {
+            "type": "Point",
+            "coordinates": [branch_dict["lon"], branch_dict["lat"]]
+        }
+        # Remove lon and lat fields as they are now part of location
+        branch_dict.pop("lon")
+        branch_dict.pop("lat")
+    
     filter_query = {
-        "id": branch_dict["id"],
+        "store_id": branch_dict["store_id"],
         "chain": branch_dict["chain"]
     }
     update_data = {

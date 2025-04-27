@@ -333,10 +333,11 @@ class CoopOnlineCrawler(BranchCrawler):
                         )
                         print(f"Crawling: {city['name']} – {district['name']} – {district['wards'][wid]}")
                         stores = self._parse_stores(html, city["name"], district["name"], district['wards'][wid])
-                        print(stores)
                         for store in stores:
-                            key = (store["id"], store["chain"])
+                            store["store_id"] = store.pop("id")
+                            key = (store["store_id"], store["chain"])
                             store_map[key] = store
+
             await browser.close()
             return list(store_map.values())
     async def fetch_categories(self) -> List[Dict]:
