@@ -15,6 +15,9 @@ import sys
 import os
 import re
 import unicodedata
+import requests
+from dotenv import load_dotenv
+load_dotenv()
 
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
@@ -31,6 +34,22 @@ tokenizer_vi2en = AutoTokenizer.from_pretrained(
     tgt_lang="en_XX"      
 )
 model_vi2en = AutoModelForSeq2SeqLM.from_pretrained("vinai/vinai-translate-vi2en-v2")
+
+
+api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+def get_lat_lng(address, api_key):
+    url = "https://geocode.maps.co/search"
+    params = {"q": address, "api_key": api_key}
+    response = requests.get(url, params=params)
+    if response.status_code == 200:
+        data = response.json()
+        if data:
+            lat = data[0]['lat']
+            lng = data[0]['lon']
+            return lat, lng
+        else:
+            print("No results found")
+    return 0, 0
 
 def translate_vi2en(vi_text: str) -> str:
     inputs = tokenizer_vi2en(vi_text, return_tensors="pt")
@@ -333,10 +352,19 @@ class CoopOnlineCrawler(BranchCrawler):
                         )
                         print(f"Crawling: {city['name']} – {district['name']} – {district['wards'][wid]}")
                         stores = self._parse_stores(html, city["name"], district["name"], district['wards'][wid])
+                        # print(f"Crawled stores: {stores}")
                         for store in stores:
                             store["store_id"] = store.pop("id")
                             key = (store["store_id"], store["chain"])
                             store_map[key] = store
+                            print(store["name"])
+            api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+            for store in store_map.values():
+                address = store.get("address", "")
+                lat, lon = get_lat_lng(address, api_key)
+                store["lat"] = lat
+                store["lon"] = lon
+                print(f"Store {store['name']} updated with lat/lng: {lat}, {lon}")
 
             await browser.close()
             return list(store_map.values())
