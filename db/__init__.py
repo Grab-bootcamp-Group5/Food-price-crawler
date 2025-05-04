@@ -76,4 +76,5 @@ async def upsert_branch(branch_dict: dict):
     update_data = {
         "$set": branch_dict  # cập nhật toàn bộ fields
     }
+    print(f"Upserting branch: {branch_dict['store_id']}, {branch_dict['chain']}")
     await store_branches.update_one(filter_query, update_data, upsert=True)

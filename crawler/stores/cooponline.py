@@ -65,8 +65,8 @@ def translate_vi2en(vi_text: str) -> str:
 class CoopOnlineCrawler(BranchCrawler):
     chain = "cooponline"
 
-    def __init__(self, store_id: str):
-        self.store_id = store_id
+    def __init__(self):
+        self.store_id = 571
         self.browser = None
         self.context = None
         self.page = None
