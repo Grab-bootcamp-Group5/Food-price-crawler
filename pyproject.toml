@@ -25,7 +25,8 @@ dependencies = [
     "motor (>=3.7.0,<4.0.0)",
     "transformers (>=4.51.3,<5.0.0)",
     "sentencepiece (>=0.2.0,<0.3.0)",
-    "torch (>=2.7.0,<3.0.0)"
+    "torch (>=2.7.0,<3.0.0)",
+    "curl-cffi (>=0.10.0,<0.11.0)"
 ]
 
 

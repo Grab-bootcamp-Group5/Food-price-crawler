@@ -22,6 +22,7 @@ async def async_main(domain: str):
         if isinstance(c, type) and hasattr(c, "chain") and c.chain == domain
     )
     crawler = crawler_cls()
+    await crawler.init()
     await crawler.crawl_prices()
 
 
