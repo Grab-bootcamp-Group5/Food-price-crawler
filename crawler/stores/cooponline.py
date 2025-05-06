@@ -216,7 +216,6 @@ class CoopOnlineCrawler(BranchCrawler):
                 print(all_products[-1])
             page_number += 1
         print(f"Total products fetched: {len(all_products)}")
-        # Save to database
         return all_products
 
     async def get_store_ids_from_db(db_path="sqlite+aiosqlite:///prices.db") -> List[str]:

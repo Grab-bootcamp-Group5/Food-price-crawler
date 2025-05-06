@@ -13,7 +13,7 @@ def parse_date_safe(date_str):
 
 # metadata_db.category_shards
 meta_client = AsyncIOMotorClient("mongodb://103.172.79.235:27017")
-meta_db = meta_client.metadata_db
+meta_db = meta_client.metadata_db_v2
 category_shard_meta = meta_db.category_shards
 store_branches = meta_db.store_branches
 
