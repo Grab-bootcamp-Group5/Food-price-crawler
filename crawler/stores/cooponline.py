@@ -111,7 +111,7 @@ def extract_best_price(product: dict) -> dict:
             ## round to 1 decimal
             
             discountPercent = 1- price/float(info.get("price"))
-            print(f"[BasePrice] Product name: {name}, discountPercent: {discountPercent}")
+            # print(f"[BasePrice] Product name: {name}, discountPercent: {discountPercent}")
         else:
             price = float(info.get("price", 0))
         return {
@@ -120,7 +120,7 @@ def extract_best_price(product: dict) -> dict:
             "netUnitValue": net_value,
             "price": price,
             "sysPrice": float(info.get("price")),
-            "discount": round(discountPercent,1),
+            "discount": round(discountPercent,2),
             "date_begin": info.get("date_begin"),
             "date_end": info.get("date_end"),
         }
@@ -321,7 +321,7 @@ class CoopOnlineCrawler(BranchCrawler):
                 price_info = extract_best_price(item)
                 token_ngrams = generate_token_ngrams(english_name, 2)
                 # print(f"Product: {price_info['name']}, Discount Percent: {price_info['discount']}, SysPrice {price_info['sysPrice']}, Price: {price_info['price']}, Unit: {price_info['unit']}, netUnitValue: {price_info['netUnitValue']}")
-                all_products.append({
+                product_data = {
                     "sku": item.get("sku"),
                     "name": item.get("name"),
                     "name_en": english_name,
@@ -338,10 +338,11 @@ class CoopOnlineCrawler(BranchCrawler):
                     "date_begin": price_info.get("date_begin"),
                     "date_end": price_info.get("date_end"),
                     "category": category,
-                    "store_id": store,
+                    "store_id": store_object["_id"],
                     "crawled_at": datetime.utcnow().isoformat()
-                })
-                print(all_products[-1])
+                }
+                all_products.append(product_data)
+                await upsert_product(product_data, category)
             page_number += 1
         print(f"Total products fetched: {len(all_products)}")
         return all_products
@@ -584,35 +585,9 @@ class CoopOnlineCrawler(BranchCrawler):
                 for category in categories:
                     title = category['title']
                     if title in valid_titles:
-                        # Mapping category to English
-                        category["title"] = categories_mapping[title]
-                        # print(f"Category: {category['title']}, Link: {category['link']}")
+                        category['title'] = categories_mapping.get(title, title)
                         products = await crawler.fetch_products_by_page(store, category)
-                        print(f"{self.store_id}: {len(products)} products")
-                        # for product in products:
-                            
-        
-                            # token_ngrams = generate_token_ngrams(english_name, 2)
-                            # product_data = {
-                            #     "sku": product["id"],
-                            #     "name": product["name"],
-                            #     "name_en": english_name,
-                            #     "unit": price_info["unit"].lower(),
-                            #     "netUnitValue": price_info["netUnitValue"], 
-                            #     "token_ngrams": token_ngrams,
-                            #     "category": cat["title"],
-                            #     "store_id": branch["_id"],
-                            #     "url": f"https://www.bachhoaxanh.com{product['url']}",
-                            #     "image": product["avatar"],
-                            #     "promotion": product.get("promotionText", ""),
-                            #     "price": price_info["price"],
-                            #     "sysPrice": price_info["sysPrice"],
-                            #     "discountPercent": price_info["discountPercent"],
-                            #     "date_begin": price_info["date_begin"],
-                            #     "date_end": price_info["date_end"],
-                            #     "crawled_at": datetime.utcnow().isoformat(),
-                            # }
-                            # await upsert_product(product, category["title"])
+                        print(f"{self.store_id}: {len(products)} products found in category {category['title']}")
                 # print(f"{store_id}: {len(products)} products")
             except Exception as e:
                 print(f"Failed for store {store_id}:", e)
