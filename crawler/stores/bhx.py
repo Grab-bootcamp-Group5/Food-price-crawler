@@ -24,6 +24,7 @@ import torch
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
 from db import upsert_product
+from typing import List
 session = Session(impersonate="chrome110")
 torch.set_num_threads(15) 
 
@@ -45,6 +46,120 @@ def translate_vi2en(vi_text: str) -> str:
         early_stopping=True
     )
     return tokenizer_vi2en.decode(outputs[0], skip_special_tokens=True)
+import re
+
+def extract_net_value_and_unit_from_name(name: str, fallback_unit: str):
+    tmp_name = name.lower()
+    match = re.search(r"(\d+(\.\d+)?)\s*(g|ml|lít|kg|gói)", tmp_name)
+    if match:
+        value = float(match.group(1))
+        unit = match.group(3)
+        return value, unit
+    return 0, fallback_unit
+
+def normalize_net_value(unit: str, net_value: float, name: str):
+    unit = unit.lower()
+    name_lower = name.lower()
+
+    # 1. Nếu là đơn vị quy đổi thì nhân để tính lại netValue, NHƯNG GIỮ UNIT GỐC
+    if unit == "kg":
+        return float(net_value) * 1000, "g"
+    elif unit == "lít":
+        return float(net_value) * 1000, "ml"
+    if unit not in ["kg", "g", "ml", "lít"]:
+        match_kg = re.search(r"(\d+(\.\d+)?)\s*kg", name_lower)
+        if match_kg:
+            value = float(match_kg.group(1))
+            return value * 1000, unit
+    if unit == "túi 1kg":
+        return float(net_value) * 1000, "túi"
+    # 2. Túi có trái thì giả định 0.7kg
+    if unit == "túi" and "trái" in name_lower:
+        return 0.7 * 1000, unit
+
+    # 3. Hộp hoặc vỉ có số lượng (quả trứng, ...)
+    if unit in ["hộp", "vỉ"] and "quả" in name_lower:
+        matches = re.findall(rf"{unit}\s*(\d+)", name_lower)
+        if matches:
+            return sum(map(int, matches)), unit
+
+    # 4. Thùng / Lốc X đơn vị Y ml/g
+    match_pack = re.search(r"(thùng|lốc)\s*(\d+).*?(\d+(\.\d+)?)\s*(g|ml)", name_lower)
+    if match_pack:
+        count = int(match_pack.group(2))
+        per_item = float(match_pack.group(3))
+        return count * per_item, unit
+
+    # 5. Trường hợp fallback (gói, khay, ống...) — giữ nguyên unit gốc, chỉ đổi value nếu có thông tin
+    extracted_value, _ = extract_net_value_and_unit_from_name(name, unit)
+    if extracted_value > 0:
+        return extracted_value, unit
+
+    return float(net_value) if net_value != 0 else 1, unit
+
+def extract_best_price(product: dict) -> dict:
+    base_price_info = product.get("productPrices", [])
+    campaign_info = product.get("lstCampaingInfo", [])
+    name = product.get("name", "")
+    original_unit = product.get("unit", "").lower()
+    def build_result(info: dict, unit: str, net_value: float):
+        return {
+            "name": name,
+            "unit": unit, 
+            "netUnitValue": net_value,
+            "price": info.get("price"),
+            "sysPrice": info.get("sysPrice"),
+            "discountPercent": info.get("discountPercent"),
+            "date_begin": info.get("startTime") or info.get("poDate"),
+            "date_end": info.get("dueTime") or info.get("poDate"),
+        }
+    # 1. Campaign ưu tiên
+    if campaign_info:
+        campaign = campaign_info[0]
+        campaign_price = campaign.get("productPrice", {})
+        net_value = campaign_price.get("netUnitValue", 0)
+
+        net_value, converted_unit = normalize_net_value(original_unit, net_value, name)
+        # print(f"[Campaign] Product name: {name}, old unit: {original_unit}, netUnitValue: {net_value}")
+        return build_result(campaign_price, converted_unit, net_value)
+
+    # 2. Fallback sang base_price
+    if base_price_info:
+        price_info = base_price_info[0]
+        net_value = price_info.get("netUnitValue", 0)
+
+        net_value, converted_unit = normalize_net_value(original_unit, net_value, name)
+        # print(f"[BasePrice] Product name: {name}, old unit: {original_unit}, netUnitValue: {net_value}")
+        return build_result(price_info, converted_unit, net_value)
+
+    # 3. No info then u
+    return {
+        "name": name,
+        "unit": original_unit,
+        "netUnitValue": 1,
+        "price": None,
+        "sysPrice": None,
+        "discountPercent": None,
+        "date_begin": None,
+        "date_end": None,
+    }
+
+def tokenize_by_whitespace(text: str) -> List[str]:
+    if text is None:
+        return []
+    return [token for token in text.lower().split() if len(token) >= 2]
+
+def generate_ngrams(token: str, n: int) -> List[str]:
+    if token is None or len(token) < n:
+        return []
+    return [token[i:i+n] for i in range(len(token) - n + 1)]
+
+def generate_token_ngrams(text: str, n: int) -> List[str]:
+    tokens = tokenize_by_whitespace(text)
+    ngrams = []
+    for token in tokens:
+        ngrams.extend(generate_ngrams(token, n))
+    return ngrams
 
 from db import upsert_branch
 from .base import BranchCrawler
@@ -416,8 +531,7 @@ class BHXOnlineCrawler(BranchCrawler):
         return []
     async def fetch_branches(self):
         meta_client = AsyncIOMotorClient("mongodb://103.172.79.235:27017")
-        meta_db = meta_client.metadata_db
-        category_shard_meta = meta_db.category_shards
+        meta_db = meta_client.metadata_db_v3
         store_branches = meta_db.store_branches
 
         ## Get all branches that have chain = bhx
@@ -464,158 +578,104 @@ class BHXOnlineCrawler(BranchCrawler):
                 return
             print(f"Found {len(categories)} categories")
             for cat in categories:
-                url = (
-                    "https://apibhx.tgdd.vn/Category/V2/GetCate"
-                    f"?provinceId={branch['provinceId']}&wardId={branch['wardId']}"
-                    f"&districtId={branch['districtId']}&storeId={branch['store_id']}"
-                    f"&categoryUrl={quote(cat['link'].strip('/'))}"
-                    f"&isMobile=true&isV2=true&pageSize=1000"
-                )
+                page_index = 1
+                products = []
+                while True:
+                    url = (
+                        "https://apibhx.tgdd.vn/Category/V2/GetCate"
+                        f"?provinceId={branch['provinceId']}&wardId={branch['wardId']}"
+                        f"&districtId={branch['districtId']}&storeId={branch['store_id']}"
+                        f"&categoryUrl={quote(cat['link'].strip('/'))}"
+                        f"&isMobile=true&isV2=true&pageSize={1000}&pageIndex={page_index}"
+                    )
 
-                headers = headers_base.copy()
-                headers["referer"] = f"https://www.bachhoaxanh.com/{cat['link'].strip('/')}"
-                headers["referer-url"] = headers["referer"]
+                    headers = headers_base.copy()
+                    headers["referer"] = f"https://www.bachhoaxanh.com/{cat['link'].strip('/')}"
+                    headers["referer-url"] = headers["referer"]
 
-                try:
-                    res = session.get(url, headers=headers)
-                except Exception as e:
-                    print(f"Request failed: {e}")
-                    continue
+                    try:
+                        res = session.get(url, headers=headers)
+                    except Exception as e:
+                        print(f"Request failed: {e}")
+                        break
 
-                if res.status_code != 200:
-                    print(f"Failed [{res.status_code}] for {cat['title']} at store {branch['store_id']}")
-                    continue
+                    if res.status_code != 200:
+                        print(f"Failed [{res.status_code}] for {cat['title']} at store {branch['store_id']}")
+                        break
 
-                data = res.json()
-                import re
+                    data = res.json()
 
-                def extract_net_value_and_unit_from_name(name: str, fallback_unit: str):
-                    tmp_name = name.lower()
-                    match = re.search(r"(\d+(\.\d+)?)\s*(g|ml|lít|kg|gói)", tmp_name)
-                    if match:
-                        value = float(match.group(1))
-                        unit = match.group(3)
-                        return value, unit
-                    return 0, fallback_unit
-
-                def normalize_net_value(unit: str, net_value: float, name: str):
-                    unit = unit.lower()
-                    name_lower = name.lower()
-
-                    # 1. Nếu là đơn vị quy đổi thì nhân để tính lại netValue, NHƯNG GIỮ UNIT GỐC
-                    if unit == "kg":
-                        return float(net_value) * 1000, "g"
-                    elif unit == "lít":
-                        return float(net_value) * 1000, "ml"
-                    if unit not in ["kg", "g", "ml", "lít"]:
-                        match_kg = re.search(r"(\d+(\.\d+)?)\s*kg", name_lower)
-                        if match_kg:
-                            value = float(match_kg.group(1))
-                            return value * 1000, unit
-                    if unit == "túi 1kg":
-                        return float(net_value) * 1000, "túi"
-                    # 2. Túi có trái thì giả định 0.7kg
-                    if unit == "túi" and "trái" in name_lower:
-                        return 0.7 * 1000, unit
-
-                    # 3. Hộp hoặc vỉ có số lượng (quả trứng, ...)
-                    if unit in ["hộp", "vỉ"] and "quả" in name_lower:
-                        matches = re.findall(rf"{unit}\s*(\d+)", name_lower)
-                        if matches:
-                            return sum(map(int, matches)), unit
-
-                    # 4. Thùng / Lốc X đơn vị Y ml/g
-                    match_pack = re.search(r"(thùng|lốc)\s*(\d+).*?(\d+(\.\d+)?)\s*(g|ml)", name_lower)
-                    if match_pack:
-                        count = int(match_pack.group(2))
-                        per_item = float(match_pack.group(3))
-                        return count * per_item, unit
-
-                    # 5. Trường hợp fallback (gói, khay, ống...) — giữ nguyên unit gốc, chỉ đổi value nếu có thông tin
-                    extracted_value, _ = extract_net_value_and_unit_from_name(name, unit)
-                    if extracted_value > 0:
-                        return extracted_value, unit
-
-                    return float(net_value) if net_value != 0 else 1, unit
-
-                def extract_best_price(product: dict) -> dict:
-                    base_price_info = product.get("productPrices", [])
-                    campaign_info = product.get("lstCampaingInfo", [])
-                    name = product.get("name", "")
-                    original_unit = product.get("unit", "").lower()
-
-                    def build_result(info: dict, unit: str, net_value: float):
-                        return {
-                            "name": name,
-                            "unit": unit, 
-                            "netUnitValue": net_value,
-                            "price": info.get("price"),
-                            "sysPrice": info.get("sysPrice"),
-                            "discountPercent": info.get("discountPercent"),
-                            "date_begin": info.get("startTime") or info.get("poDate"),
-                            "date_end": info.get("dueTime") or info.get("poDate"),
-                        }
-
-                    # 1. Campaign ưu tiên
-                    if campaign_info:
-                        campaign = campaign_info[0]
-                        campaign_price = campaign.get("productPrice", {})
-                        net_value = campaign_price.get("netUnitValue", 0)
+                
+                    batch = data.get("data", {}).get("products", [])
+                    total = data.get("data", {}).get("total", 0)
                     
-                        net_value, converted_unit = normalize_net_value(original_unit, net_value, name)
-                        # print(f"[Campaign] Product name: {name}, old unit: {original_unit}, netUnitValue: {net_value}")
-                        return build_result(campaign_price, converted_unit, net_value)
+                    for product in batch:
+                        english_name = translate_vi2en(product.get("name", ""))
+                        if not english_name:
+                            print(f"Failed to translate name: {item.get('name', '')}")
+                            continue
+                        price_info = extract_best_price(product)
+                        token_ngrams = generate_token_ngrams(english_name, 2)
+                        product_data = {
+                            "sku": product["id"],
+                            "name": product["name"],
+                            "name_en": english_name,
+                            "unit": price_info["unit"].lower(),
+                            "netUnitValue": price_info["netUnitValue"], 
+                            "token_ngrams": token_ngrams,
+                            "category": cat["title"],
+                            "store_id": branch["_id"],
+                            "url": f"https://www.bachhoaxanh.com{product['url']}",
+                            "image": product["avatar"],
+                            "promotion": product.get("promotionText", ""),
+                            "price": price_info["price"],
+                            "sysPrice": price_info["sysPrice"],
+                            "discountPercent": price_info["discountPercent"],
+                            "date_begin": price_info["date_begin"],
+                            "date_end": price_info["date_end"],
+                            "crawled_at": datetime.utcnow().isoformat(),
+                        }
+                        # print(f"Product data: {product_data}")
+                        await upsert_product(product_data, cat["title"])
+                    products.extend(batch)
 
-                    # 2. Fallback sang base_price
-                    if base_price_info:
-                        price_info = base_price_info[0]
-                        net_value = price_info.get("netUnitValue", 0)
+                    if len(products) >= total:
+                        break
 
-                        net_value, converted_unit = normalize_net_value(original_unit, net_value, name)
-                        # print(f"[BasePrice] Product name: {name}, old unit: {original_unit}, netUnitValue: {net_value}")
-                        return build_result(price_info, converted_unit, net_value)
+                    page_index += 1
 
-                    # 3. No info then u
-                    return {
-                        "name": name,
-                        "unit": original_unit,
-                        "netUnitValue": 1,
-                        "price": None,
-                        "sysPrice": None,
-                        "discountPercent": None,
-                        "date_begin": None,
-                        "date_end": None,
-                    }
-                products = data.get("data", {}).get("products", [])
-                for product in products:
-                    english_name = translate_vi2en(product.get("name", ""))
-                    if not english_name:
-                        print(f"Failed to translate name: {item.get('name', '')}")
-                        continue
-                    # check if have number before "hũ" "chai" "gói" "hộp" "túi" "lon" "thùng" "lốc" in name
-                    # match = re.search(r"(\d+)\s*(hũ|chai|gói|hộp|túi|lon|thùng|lốc)", product["name"].lower())
-                    price_info = extract_best_price(product)
-                    # print(f"Product name: {product['name']}, unit: {price_info['unit']}, netUnitValue: {price_info['netUnitValue']}")
-                    product_data = {
-                        "sku": product["id"],
-                        "name": product["name"],
-                        "name_ev": english_name,
-                        "unit": price_info["unit"].lower(),  # giữ nguyên unit gốc
-                        "netUnitValue": price_info["netUnitValue"],  # <-- bổ sung trường này
-                        "category": cat["title"],
-                        "store_id": branch["_id"],
-                        "ts": datetime.now(),
-                        "url": f"https://www.bachhoaxanh.com{product['url']}",
-                        "image": product["avatar"],
-                        "promotion": product.get("promotionText", ""),
-                        "price": price_info["price"],
-                        "sysPrice": price_info["sysPrice"],
-                        "dicountPercent": price_info["discountPercent"],
-                        "date_begin": price_info["date_begin"],
-                        "date_end": price_info["date_end"],
-                        "crawled_at": datetime.utcnow().isoformat(),
-                    }
-                    # print(f"Product data: {product_data}")
+                print(f"Fetched {len(products)} / {total} products in category '{cat['title']}' for store {branch['store_id']}")
+                # for product in products:
+                #     english_name = translate_vi2en(product.get("name", ""))
+                #     if not english_name:
+                #         print(f"Failed to translate name: {item.get('name', '')}")
+                #         continue
+                #     # check if have number before "hũ" "chai" "gói" "hộp" "túi" "lon" "thùng" "lốc" in name
+                #     # match = re.search(r"(\d+)\s*(hũ|chai|gói|hộp|túi|lon|thùng|lốc)", product["name"].lower())
+                #     price_info = extract_best_price(product)
+                #     # print(f"Product name: {product['name']}, unit: {price_info['unit']}, netUnitValue: {price_info['netUnitValue']}")
+                #     product_data = {
+                #         "sku": product["id"],
+                #         "name": product["name"],
+                #         "name_en": english_name,
+                #         "unit": price_info["unit"].lower(),  # giữ nguyên unit gốc
+                #         "netUnitValue": price_info["netUnitValue"],  # <-- bổ sung trường này
+                #         "category": cat["title"],
+                #         "store_id": branch["_id"],
+                #         "ts": datetime.now(),
+                #         "url": f"https://www.bachhoaxanh.com{product['url']}",
+                #         "image": product["avatar"],
+                #         "promotion": product.get("promotionText", ""),
+                #         "price": price_info["price"],
+                #         "sysPrice": price_info["sysPrice"],
+                #         "discountPercent": price_info["discountPercent"],
+                #         "date_begin": price_info["date_begin"],
+                #         "date_end": price_info["date_end"],
+                #         "crawled_at": datetime.utcnow().isoformat(),
+                #     }
+                #     # upsert_product(product_data)
+                #     await upsert_product(product_data, cat["title"])
+                # print(f"Fetched {len(products)} products for category {cat['title']} at store {branch['store_id']}")
 
 
 

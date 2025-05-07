@@ -13,7 +13,7 @@ def parse_date_safe(date_str):
 
 # metadata_db.category_shards
 meta_client = AsyncIOMotorClient("mongodb://103.172.79.235:27017")
-meta_db = meta_client.metadata_db_v2
+meta_db = meta_client.metadata_db_v3
 category_shard_meta = meta_db.category_shards
 store_branches = meta_db.store_branches
 
@@ -38,22 +38,44 @@ async def upsert_product(product: dict, category_en: str):
     collection = get_shard_connection(server_uri, db_name, collection_name)
     
     filter_query = {"store": product["store_id"], "sku": product["sku"]}
+    # product_data = {
+    #                     "sku": product["id"],
+    #                     "name": product["name"],
+    #                     "name_en": english_name,
+    #                     "unit": price_info["unit"].lower(),  # giữ nguyên unit gốc
+    #                     "netUnitValue": price_info["netUnitValue"],  # <-- bổ sung trường này
+    #                     "category": cat["title"],
+    #                     "store_id": branch["_id"],
+    #                     "ts": datetime.now(),
+    #                     "url": f"https://www.bachhoaxanh.com{product['url']}",
+    #                     "image": product["avatar"],
+    #                     "promotion": product.get("promotionText", ""),
+    #                     "price": price_info["price"],
+    #                     "sysPrice": price_info["sysPrice"],
+    #                     "dicountPercent": price_info["discountPercent"],
+    #                     "date_begin": price_info["date_begin"],
+    #                     "date_end": price_info["date_end"],
+    #                     "crawled_at": datetime.utcnow().isoformat(),
+    #                 }
     update_data = {
         "$set": {
+            "sku": product["sku"],
             "name": product["name"],
-            "name_ev": product["name_en"],
-            "unit": product["unit"],
-            "price": product["price"],
-            "discount": product["discount"],
-            "promotion": product["promotion"],
+            "name_en": product["name_en"],
+            "unit": product["unit"].lower(), 
+            "netUnitValue": product["netUnitValue"], 
+            "token_ngrams": product["token_ngrams"],
+            "category": category_en,
+            "store_id": product["store_id"],
+            "url": product["url"],
             "image": product["image"],
-            "link": product["link"],
-            "excerpt": product["excerpt"],
+            "promotion": product.get("promotion", ""),
+            "price": product["price"],
+            "sysPrice": product["sysPrice"],
+            "dicountPercent": product["discountPercent"],
             "date_begin": parse_date_safe(product["date_begin"]),
             "date_end": parse_date_safe(product["date_end"]),
-            "store_id": product["store_id"],
-            "category": category_en,
-            "ts": datetime.utcnow(),
+            "crawled_at": datetime.utcnow().isoformat(),
         }
     }
     await collection.update_one(filter_query, update_data, upsert=True)
