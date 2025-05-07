@@ -38,25 +38,7 @@ async def upsert_product(product: dict, category_en: str):
     collection = get_shard_connection(server_uri, db_name, collection_name)
     
     filter_query = {"store": product["store_id"], "sku": product["sku"]}
-    # product_data = {
-    #                     "sku": product["id"],
-    #                     "name": product["name"],
-    #                     "name_en": english_name,
-    #                     "unit": price_info["unit"].lower(),  # giữ nguyên unit gốc
-    #                     "netUnitValue": price_info["netUnitValue"],  # <-- bổ sung trường này
-    #                     "category": cat["title"],
-    #                     "store_id": branch["_id"],
-    #                     "ts": datetime.now(),
-    #                     "url": f"https://www.bachhoaxanh.com{product['url']}",
-    #                     "image": product["avatar"],
-    #                     "promotion": product.get("promotionText", ""),
-    #                     "price": price_info["price"],
-    #                     "sysPrice": price_info["sysPrice"],
-    #                     "dicountPercent": price_info["discountPercent"],
-    #                     "date_begin": price_info["date_begin"],
-    #                     "date_end": price_info["date_end"],
-    #                     "crawled_at": datetime.utcnow().isoformat(),
-    #                 }
+
     update_data = {
         "$set": {
             "sku": product["sku"],
@@ -100,3 +82,10 @@ async def upsert_branch(branch_dict: dict):
     }
     print(f"Upserting branch: {branch_dict['store_id']}, {branch_dict['chain']}")
     await store_branches.update_one(filter_query, update_data, upsert=True)
+
+async def fetch_branches(chain: str):
+
+    ## Get all branches that have chain = bhx
+    branches = await store_branches.find({"chain": chain}).to_list(length=None)
+    print(f"Found {len(branches)} branches for chain {chain}")
+    return branches

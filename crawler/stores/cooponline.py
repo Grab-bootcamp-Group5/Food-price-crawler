@@ -23,7 +23,7 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import torch
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 
-from db import upsert_product
+from db import upsert_product, upsert_branch, fetch_branches
 
 torch.set_num_threads(15) 
 
@@ -34,22 +34,138 @@ tokenizer_vi2en = AutoTokenizer.from_pretrained(
     tgt_lang="en_XX"      
 )
 model_vi2en = AutoModelForSeq2SeqLM.from_pretrained("vinai/vinai-translate-vi2en-v2")
+import re
 
+def extract_net_value_and_unit_from_name(name: str, fallback_unit: str):
+    tmp_name = name.lower()
+    match = re.search(r"(\d+(\.\d+)?)\s*(g|ml|lít|kg|gói|l)", tmp_name)
+    if match:
+        value = float(match.group(1))
+        unit = match.group(3)
+        return value, unit
+    return 1, fallback_unit
 
-api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
-def get_lat_lng(address, api_key):
-    url = "https://geocode.maps.co/search"
-    params = {"q": address, "api_key": api_key}
-    response = requests.get(url, params=params)
-    if response.status_code == 200:
-        data = response.json()
-        if data:
-            lat = data[0]['lat']
-            lng = data[0]['lon']
-            return lat, lng
+def normalize_net_value(unit: str, net_value: float, name: str):
+    unit = unit.lower()
+    name_lower = name.lower()
+
+    ## Net value can only find on name_lower it may be not exist like kg or exists with 250 ml 250ml 259g 250 g so we need to match reges
+    # 0. Trường hợp không có net value thì lấy từ name
+    net_value, unit= extract_net_value_and_unit_from_name(name, unit)
+
+    if unit == "kg":
+        return float(net_value) * 1000, "g"
+    elif unit == "l":
+        return float(net_value) * 1000, "ml"
+
+    if unit in ["g", "ml"]:
+        match_kg = re.search(r"(\d+(\.\d+)?)?\s*kg", name_lower)
+        if match_kg:
+            # value may be not exist in name
+            value = match_kg.group(1)
+            # check if value is number
+            if str(value).isdigit():
+                value = float(value)
+                return value * 1000, unit
+            return 1000, unit
+    if unit in ["cái"]:
+        return float(net_value) * 1000, "g"
+    if unit in ["g", "hộp", "vĩ"] and "trứng" in name_lower:
+        match = re.search(r"(\d+)\s*trứng", name_lower)
+        if match:
+            return int(match.group(1)), "hộp"
+
+    if unit in ["vĩ"] and "kg" in name_lower:
+        return float(net_value) * 1000, "g"
+    if unit in ["trái", "túi", "bịch"]:
+        return float(net_value) * 1000, unit
+
+    # 3. Hộp hoặc vỉ có số lượng (quả trứng, ...)
+    if unit in ["hộp"] and "quả" in name_lower:
+        matches = re.findall(rf"{unit}\s*(\d+)", name_lower)
+        if matches:
+            return sum(map(int, matches)), unit
+
+    # 4. Thùng / Lốc X đơn vị Y ml/g
+    match_pack = re.search(r"(thùng|lốc)\s*(\d+).*?(\d+(\.\d+)?)\s*(g|ml)", name_lower)
+    if match_pack:
+        count = int(match_pack.group(2))
+        per_item = float(match_pack.group(3))
+        return count * per_item, unit
+
+    # 5. Trường hợp fallback (gói, khay, ống...) — giữ nguyên unit gốc, chỉ đổi value nếu có thông tin
+    extracted_value, _ = extract_net_value_and_unit_from_name(name, unit)
+    if extracted_value > 0:
+        return extracted_value, unit
+
+    return float(net_value) if net_value != 0 else 1000, unit
+
+def extract_best_price(product: dict) -> dict:
+    name = product.get("name", "")
+    original_unit = product.get("unit", "").lower()
+    def build_result(info: dict, unit: str, net_value: float):
+        # calculate price by discount if exist
+        discountPercent = 0
+        if info.get("discount") and float(info.get("discount")) > 0:
+            price = float(info.get("discount"))
+            ## round to 1 decimal
+            
+            discountPercent = 1- price/float(info.get("price"))
+            print(f"[BasePrice] Product name: {name}, discountPercent: {discountPercent}")
         else:
-            print("No results found")
+            price = float(info.get("price", 0))
+        return {
+            "name": name,
+            "unit": unit, 
+            "netUnitValue": net_value,
+            "price": price,
+            "sysPrice": float(info.get("price")),
+            "discount": round(discountPercent,1),
+            "date_begin": info.get("date_begin"),
+            "date_end": info.get("date_end"),
+        }
+
+    net_value, converted_unit = normalize_net_value(original_unit, 0, name)
+    # print(f"[BasePrice] Product name: {name}, old unit: {original_unit}, netUnitValue: {net_value}")
+    return build_result(product, converted_unit, net_value)
+
+
+def tokenize_by_whitespace(text: str) -> List[str]:
+    if text is None:
+        return []
+    return [token for token in text.lower().split() if len(token) >= 2]
+
+def generate_ngrams(token: str, n: int) -> List[str]:
+    if token is None or len(token) < n:
+        return []
+    return [token[i:i+n] for i in range(len(token) - n + 1)]
+
+def generate_token_ngrams(text: str, n: int) -> List[str]:
+    tokens = tokenize_by_whitespace(text)
+    ngrams = []
+    for token in tokens:
+        ngrams.extend(generate_ngrams(token, n))
+    return ngrams
+
+def get_lat_lng(store_name, api_key):
+    api_url = f"https://api.openrouteservice.org/geocode/search?api_key={api_key}&text={store_name}"
+    print("Geocoding:", api_url)
+    try:
+        response = requests.get(api_url)
+        response.raise_for_status()
+        data = response.json()
+
+        if data.get("features"):
+            first_feature = data["features"][0]
+            lon, lat = first_feature["geometry"]["coordinates"]
+            return lat, lon
+        else:
+            print(f"No features returned for: {store_name}")
+    except Exception as e:
+        print(f"Error fetching geocode for {store_name}: {e}")
+    
     return 0, 0
+
 
 def translate_vi2en(vi_text: str) -> str:
     inputs = tokenizer_vi2en(vi_text, return_tensors="pt")
@@ -65,7 +181,7 @@ def translate_vi2en(vi_text: str) -> str:
 class CoopOnlineCrawler(BranchCrawler):
     chain = "cooponline"
 
-    def __init__(self):
+    def __init__(self, store_id: int = 571):
         self.store_id = 571
         self.browser = None
         self.context = None
@@ -92,10 +208,14 @@ class CoopOnlineCrawler(BranchCrawler):
             await self.browser.close()
 
     # --- PRODUCT CRAWLING ---
-    async def fetch_products_by_page(self, category_url: str, page_number: int = 1) -> List[dict]:
-        print(f"[Info] Fetching category: {category_url} | store={self.store_id} | page={page_number}")
+    async def fetch_products_by_page(self, store_object, category, page_number: int = 1) -> List[dict]:
+        # print(f"[Info] Fetching category: {category_url} | store={self.store_id} | page={page_number}")
 
         # Phải load trang danh mục để browser context có JS và cookies đúng
+        category_url = category.get("link", "")
+        if not category_url:
+            print(f"[Error] Invalid category URL: {category_url}")
+            return []
         await self.page.goto(category_url)
 
         # Dùng browser context để gọi fetch như browser thực sự
@@ -143,17 +263,19 @@ class CoopOnlineCrawler(BranchCrawler):
             print(f"[Warning] No valid items found for category {category_url}")
             return []
 
-        return await self.fetch_products_by_taxonomy(term_id, taxonomy, self.store_id, category_url, items)
+        return await self.fetch_products_by_taxonomy(term_id, taxonomy, store_object, category, items)
 
 
 
-    async def fetch_products_by_taxonomy(self, termid: str, taxonomy: str, store: str, category_url, items: List[str]) -> List[dict]:
+    async def fetch_products_by_taxonomy(self, termid: str, taxonomy: str, store_object, category, items: List[str]) -> List[dict]:
         all_products = []
         page_number = 1
-
+        store = store_object.get("store_id", 571)
+        category_url = category.get("link", "")
+        category = category.get("title", "")
+        # print(f"[Info] Fetching products for store {store} category {category}")
         while True:
-            print(f"Fetching taxonomy page {page_number} for store {store}")
-
+            # print(f"Fetching taxonomy page {page_number} for store {store}")
             response = await self.page.evaluate(
                 """async ({ termid, taxonomy, store, items, page }) => {
                     const formData = new URLSearchParams();
@@ -190,26 +312,32 @@ class CoopOnlineCrawler(BranchCrawler):
             if not products:
                 print("No more products found. Stopping.")
                 break
-            print(f"Fetched {len(products)} products for store {store} page {page_number}")
+            # print(f"Fetched {len(products)} products for store {store} page {page_number}")
             for item in products:
                 english_name = translate_vi2en(item.get("name", ""))
                 if not english_name:
                     print(f"Failed to translate name: {item.get('name', '')}")
                     continue
+                price_info = extract_best_price(item)
+                token_ngrams = generate_token_ngrams(english_name, 2)
+                # print(f"Product: {price_info['name']}, Discount Percent: {price_info['discount']}, SysPrice {price_info['sysPrice']}, Price: {price_info['price']}, Unit: {price_info['unit']}, netUnitValue: {price_info['netUnitValue']}")
                 all_products.append({
                     "sku": item.get("sku"),
                     "name": item.get("name"),
                     "name_en": english_name,
-                    "unit": item.get("unit"),
-                    "price": float(item.get("price", "0")),
-                    "discount": float(item.get("discount", "0")),
+                    "unit": price_info.get("unit"),
+                    "netUnitValue": price_info.get("netUnitValue"),
+                    "token_ngrams": token_ngrams,
+                    "sysPrice": float(price_info.get("sysPrice", "0")),
+                    "price": float(price_info.get("price", "0")),
+                    "discountPercent": float(price_info.get("discount", "0")),
                     "promotion": item.get("promotion"),
                     "excerpt": item.get("excerpt"),
                     "image": item.get("image"),
-                    "link": item.get("link"),
-                    "date_begin": item.get("date_begin"),
-                    "date_end": item.get("date_end"),
-                    "category": category_url,
+                    "url": item.get("link"),
+                    "date_begin": price_info.get("date_begin"),
+                    "date_end": price_info.get("date_end"),
+                    "category": category,
                     "store_id": store,
                     "crawled_at": datetime.utcnow().isoformat()
                 })
@@ -217,21 +345,6 @@ class CoopOnlineCrawler(BranchCrawler):
             page_number += 1
         print(f"Total products fetched: {len(all_products)}")
         return all_products
-
-    async def get_store_ids_from_db(db_path="sqlite+aiosqlite:///prices.db") -> List[str]:
-        db_path = Path(__file__).resolve().parent.parent.parent / "prices.db"
-        print(f"Using database path: {db_path}")
-        if not db_path.exists():
-            print(f"Database file {db_path} does not exist.")
-            return []
-        engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}", future=True)
-        Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-        async with Session() as session:
-            result = await session.execute(
-                text("SELECT id FROM store_branch WHERE chain = 'cooponline'")
-            )
-            rows = result.fetchall()
-            return [row[0] for row in rows]
 
     @staticmethod
     def _normalize_name(name: str) -> str:
@@ -265,22 +378,22 @@ class CoopOnlineCrawler(BranchCrawler):
         return result
 
     @staticmethod
-    def _parse_stores(html: str, city_name: str, district_name: str, ward_name: str):
+    def _parse_stores(html: str, provinceId, districtId, wardId):
         results = []
         try:
             data = json.loads(html)
             for item in data:
                 results.append({
-                    "id": item.get("id", "unknown"),
+                    "store_id": item.get("id", "unknown"),
                     "chain": "cooponline",
                     "name": item.get("ten"),
-                    "address": item.get("diachi"),
+                    "storeLocation": item.get("diachi"),
                     "phone": item.get("dienthoai"),
-                    "city": city_name,
-                    "district": district_name,
-                    "ward": ward_name,
+                    "provinceId": provinceId,
+                    "districtId": districtId,
+                    "wardId": wardId,
                     "lat": float(item["Lat"]) if item.get("Lat") not in (None, "") else None,
-                    "lon": float(item["Lng"]) if item.get("Lng") not in (None, "") else None
+                    "lng": float(item["Lng"]) if item.get("Lng") not in (None, "") else None
                 })
             return results
         except json.JSONDecodeError:
@@ -350,20 +463,28 @@ class CoopOnlineCrawler(BranchCrawler):
                             }
                         )
                         print(f"Crawling: {city['name']} – {district['name']} – {district['wards'][wid]}")
-                        stores = self._parse_stores(html, city["name"], district["name"], district['wards'][wid])
+                        stores = self._parse_stores(html, did, did, wid)
                         # print(f"Crawled stores: {stores}")
                         for store in stores:
-                            store["store_id"] = store.pop("id")
+                            store["store_id"] = store.pop("store_id")
                             key = (store["store_id"], store["chain"])
                             store_map[key] = store
-                            print(store["name"])
-            api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
+
+                            print(store)
+
+            api_key = os.environ.get("OPENROUTE_API_KEY")
             for store in store_map.values():
-                address = store.get("address", "")
-                lat, lon = get_lat_lng(address, api_key)
+                store_name = store.get("name", "")
+                result = get_lat_lng(store_name, api_key)
+                if result and isinstance(result, tuple):
+                    lat, lon = result
+                else:
+                    lat, lon = store.get("lat", 0), store.get("lng", 0)
+
                 store["lat"] = lat
-                store["lon"] = lon
-                print(f"Store {store['name']} updated with lat/lng: {lat}, {lon}")
+                store["lng"] = lon
+                await upsert_branch(store)
+                print(f"Upserted store: {store['name']} with lat: {lat}, lon: {lon}")
 
             await browser.close()
             return list(store_map.values())
@@ -389,26 +510,34 @@ class CoopOnlineCrawler(BranchCrawler):
                         })
         return categories
     async def crawl_prices(self) -> List[Dict]:
-        store_ids = await self.get_store_ids_from_db()
-        print(f"Found {len(store_ids)} store IDs in the database.")
-        for store_id in store_ids:
+        stores = await fetch_branches(self.chain)
+        # print(store_ids)
+        print(f"Found {len(stores)} store IDs in the database.")
+        for store in stores:
+            store_id_str = store.get("store_id")
+            try:
+                store_id = int(store_id_str)
+            except (ValueError, TypeError):
+                print(f"Invalid store_id: {store_id_str} in store {store.get('name')}")
+                continue  # hoặc raise nếu muốn dừng hẳn
             crawler = CoopOnlineCrawler(store_id=store_id)
+
             try:
                 await crawler.init()
                 categories = await crawler.fetch_categories()
                 valid_titles = set([
-    "Nước rửa rau, củ, quả", "Rau Củ", "Trái cây", "Thịt", "Thủy hải sản", "Trứng",
-    "Bún tươi, bánh canh", "Thức ăn chế biến", "Kem", "Thực phẩm đông lạnh",
-    "Thực phẩm trữ mát", "Bánh", "Hạt, trái cây sấy", "Kẹo", "Mứt, thạch, rong biển",
-    "Snack", "Sản phẩm từ sữa khác", "Sữa các loại", "Sữa chua", "Sữa đặc, sữa bột",
-    "Thức uống có cồn", "Thức uống dinh dưỡng", "Thức uống không cồn", "Dầu ăn",
-    "Đồ hộp", "Gạo, nếp, đậu, bột", "Gia vị nêm", "Lạp xưởng, xúc xích, khô sấy",
-    "Ngũ cốc, bánh ăn sáng", "Nui, mì, bún, bánh tráng", "Nước chấm, mắm các loại",
-    "Thực phẩm ăn liền", "Tương, sốt"
-    # "Gia vị, gạo, thực phẩm khô",
-    # "Rau củ, trái cây", "Sữa, sản phẩm từ sữa", "Thịt, trứng, hải sản",
-    # "Thức ăn chế biến, bún tươi", "Thực phẩm đông, mát", "Thức uống"
-])   
+                    "Nước rửa rau, củ, quả", "Rau Củ", "Trái cây", "Thịt", "Thủy hải sản", "Trứng",
+                    "Bún tươi, bánh canh", "Thức ăn chế biến", "Kem", "Thực phẩm đông lạnh",
+                    "Thực phẩm trữ mát", "Bánh", "Hạt, trái cây sấy", "Kẹo", "Mứt, thạch, rong biển",
+                    "Snack", "Sản phẩm từ sữa khác", "Sữa các loại", "Sữa chua", "Sữa đặc, sữa bột",
+                    "Thức uống có cồn", "Thức uống dinh dưỡng", "Thức uống không cồn", "Dầu ăn",
+                    "Đồ hộp", "Gạo, nếp, đậu, bột", "Gia vị nêm", "Lạp xưởng, xúc xích, khô sấy",
+                    "Ngũ cốc, bánh ăn sáng", "Nui, mì, bún, bánh tráng", "Nước chấm, mắm các loại",
+                    "Thực phẩm ăn liền", "Tương, sốt"
+                    # "Gia vị, gạo, thực phẩm khô",
+                    # "Rau củ, trái cây", "Sữa, sản phẩm từ sữa", "Thịt, trứng, hải sản",
+                    # "Thức ăn chế biến, bún tươi", "Thực phẩm đông, mát", "Thức uống"
+                ])   
                 categories_mapping = {
                     'Nước rửa rau, củ, quả': 'Prepared Vegetables',
                     'Rau Củ': 'Vegetables',
@@ -457,11 +586,33 @@ class CoopOnlineCrawler(BranchCrawler):
                     if title in valid_titles:
                         # Mapping category to English
                         category["title"] = categories_mapping[title]
-                        print(f"Category: {category['title']}, Link: {category['link']}")
-                        products = await crawler.fetch_products_by_page(category["link"])
+                        # print(f"Category: {category['title']}, Link: {category['link']}")
+                        products = await crawler.fetch_products_by_page(store, category)
                         print(f"{self.store_id}: {len(products)} products")
-                        for product in products:
-                            await upsert_product(product, category["title"])
+                        # for product in products:
+                            
+        
+                            # token_ngrams = generate_token_ngrams(english_name, 2)
+                            # product_data = {
+                            #     "sku": product["id"],
+                            #     "name": product["name"],
+                            #     "name_en": english_name,
+                            #     "unit": price_info["unit"].lower(),
+                            #     "netUnitValue": price_info["netUnitValue"], 
+                            #     "token_ngrams": token_ngrams,
+                            #     "category": cat["title"],
+                            #     "store_id": branch["_id"],
+                            #     "url": f"https://www.bachhoaxanh.com{product['url']}",
+                            #     "image": product["avatar"],
+                            #     "promotion": product.get("promotionText", ""),
+                            #     "price": price_info["price"],
+                            #     "sysPrice": price_info["sysPrice"],
+                            #     "discountPercent": price_info["discountPercent"],
+                            #     "date_begin": price_info["date_begin"],
+                            #     "date_end": price_info["date_end"],
+                            #     "crawled_at": datetime.utcnow().isoformat(),
+                            # }
+                            # await upsert_product(product, category["title"])
                 # print(f"{store_id}: {len(products)} products")
             except Exception as e:
                 print(f"Failed for store {store_id}:", e)

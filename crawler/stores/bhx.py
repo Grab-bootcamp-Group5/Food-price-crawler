@@ -569,8 +569,11 @@ class BHXOnlineCrawler(BranchCrawler):
             "content-type": "application/json",
             "deviceid": str(deviceid) if deviceid else str(uuid.uuid4()),
         }
-
+        # filter branches by provinceId in 3 and 109
+        branches = [branch for branch in branches if branch["provinceId"] in [3, 109]]
         for branch in branches:
+            if branch["store_id"] == 14623:
+                continue
             print(f"Fetching prices for branch {branch['store_id']}")
             categories = await self.fetch_categories()
             if not categories:
