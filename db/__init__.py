@@ -64,13 +64,13 @@ async def upsert_product(product: dict, category_en: str):
 
 async def upsert_branch(branch_dict: dict):
     # Convert lon, lat to GeoJSON format if they exist
-    if "lon" in branch_dict and "lat" in branch_dict:
+    if "lng" in branch_dict and "lat" in branch_dict:
         branch_dict["location"] = {
             "type": "Point",
-            "coordinates": [branch_dict["lon"], branch_dict["lat"]]
+            "coordinates": [branch_dict["lng"], branch_dict["lat"]]
         }
         # Remove lon and lat fields as they are now part of location
-        branch_dict.pop("lon")
+        branch_dict.pop("lng")
         branch_dict.pop("lat")
     
     filter_query = {

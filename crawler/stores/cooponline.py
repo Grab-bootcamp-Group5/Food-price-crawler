@@ -25,7 +25,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'
 
 from db import upsert_product, upsert_branch, fetch_branches
 
-torch.set_num_threads(15) 
+torch.set_num_threads(4) 
 
 tokenizer_vi2en = AutoTokenizer.from_pretrained(
     "vinai/vinai-translate-vi2en-v2",
@@ -38,11 +38,10 @@ import re
 
 def extract_net_value_and_unit_from_name(name: str, fallback_unit: str):
     tmp_name = name.lower()
-    match = re.search(r"(\d+(\.\d+)?)\s*(g|ml|lít|kg|gói|l)", tmp_name)
-    if match:
-        value = float(match.group(1))
-        unit = match.group(3)
-        return value, unit
+    matches = re.findall(r"(\d+(?:\.\d+)?)\s*(g|ml|lít|kg|gói|l)\b", tmp_name)
+    if matches:
+        value, unit = matches[-1]  # use the LAST match
+        return float(value), unit
     return 1, fallback_unit
 
 def normalize_net_value(unit: str, net_value: float, name: str):
@@ -512,7 +511,8 @@ class CoopOnlineCrawler(BranchCrawler):
         return categories
     async def crawl_prices(self) -> List[Dict]:
         stores = await fetch_branches(self.chain)
-        # print(store_ids)
+        # filter stores by provincedId in ['786', '725]
+        stores = [store for store in stores if store.get("provinceId") in ['786', '725']]
         print(f"Found {len(stores)} store IDs in the database.")
         for store in stores:
             store_id_str = store.get("store_id")

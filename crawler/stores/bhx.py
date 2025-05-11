@@ -50,12 +50,11 @@ import re
 
 def extract_net_value_and_unit_from_name(name: str, fallback_unit: str):
     tmp_name = name.lower()
-    match = re.search(r"(\d+(\.\d+)?)\s*(g|ml|lít|kg|gói)", tmp_name)
-    if match:
-        value = float(match.group(1))
-        unit = match.group(3)
-        return value, unit
-    return 0, fallback_unit
+    matches = re.findall(r"(\d+(?:\.\d+)?)\s*(g|ml|lít|kg|gói|l)\b", tmp_name)
+    if matches:
+        value, unit = matches[-1]  # use the LAST match
+        return float(value), unit
+    return 1, fallback_unit
 
 def normalize_net_value(unit: str, net_value: float, name: str):
     unit = unit.lower()
