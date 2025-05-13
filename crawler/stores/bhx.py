@@ -50,7 +50,7 @@ import re
 
 def extract_net_value_and_unit_from_name(name: str, fallback_unit: str):
     tmp_name = name.lower()
-    match = re.search(r"(\d+(\.\d+)?)\s*(g|ml|lít|kg|gói)", tmp_name)
+    match = re.search(r"(\d+(\.\d+)?)\s*(g|ml|l|lít|kg|gói)", tmp_name)
     if match:
         value = float(match.group(1))
         unit = match.group(3)
@@ -487,19 +487,20 @@ class BHXOnlineCrawler(BranchCrawler):
                 break
 
             for store in stores:
-                store_dict = {
-                    "store_id": store["storeId"],
-                    "chain": self.chain,
-                    "name": "Bách Hóa Xanh",
-                    "lat": store["lat"],
-                    "lon": store["lng"],
-                    "address": store["storeLocation"],
-                    "provinceId": store["provinceId"],
-                    "districtId": store["districtId"],
-                    "wardId": store["wardId"],
-                }
-                await upsert_branch(store_dict)
-                stores_list.append(store_dict)
+                print(store)
+                # store_dict = {
+                #     "store_id": store["storeId"],
+                #     "chain": self.chain,
+                #     "name": "Bách Hóa Xanh",
+                #     "lat": store["lat"],
+                #     "lon": store["lng"],
+                #     "address": store["storeLocation"],
+                #     "provinceId": store["provinceId"],
+                #     "districtId": store["districtId"],
+                #     "wardId": store["wardId"],
+                # }
+                # await upsert_branch(store_dict)
+                # stores_list.append(store_dict)
                 
             print(f"Found {len(stores)} stores on page {page_index}.")
             page_index += 1
@@ -523,10 +524,29 @@ class BHXOnlineCrawler(BranchCrawler):
 
         data = await response.json()
         provinces = data["data"]["provinces"]
+        meta_client = AsyncIOMotorClient("mongodb://103.172.79.235:27017")
+        meta_db = meta_client.metadata_db_v3
+        category_shard_meta = meta_db.category_shards
+        store_branches = meta_db.store_branches
         for province in provinces:
             province_id = province["id"]
-            print(f"Fetching stores for province ID: {province_id} - {province['name']}")
-            stores = await self.fetch_stores_by_province(province_id)
+            # print(f"Fetching stores for province ID: {province_id} - {province['name']}")
+            districts = province.get("districts", [])
+            for district in districts:
+                district_name = district["name"]
+                ## Due to  district may be contains bracket so please remove it
+                district_name = re.sub(r"\(.*?\)", "", district_name).strip()
+                # by province_id, district_id and chain bhx update to db with 2 fields provinceName and districtName
+                province_name = province["name"]
+                ## province_name may contain TP.(white space) or Tỉnh or Thành Phố so please remove it
+                province_name = re.sub(r"^(TP\.|Tỉnh|Thành phố)\s*", "", province_name).strip()
+                # print(f"District: {district_name} - Province: {province_name}")
+                await store_branches.update_many(
+                    {"provinceId": province_id, "districtId": district["id"], "chain": self.chain},
+                    {"$set": {"provinceName": province_name, "districtName": district_name}},
+                    upsert=True
+                )
+            # stores = await self.fetch_stores_by_province(province_id)
                 # You can save the store data to your database here
         return []
     async def fetch_branches(self):

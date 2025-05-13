@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import text
+from motor.motor_asyncio import AsyncIOMotorClient
 from pathlib import Path
 import sys
 import os
@@ -25,7 +26,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'
 
 from db import upsert_product, upsert_branch, fetch_branches
 
-torch.set_num_threads(15) 
+torch.set_num_threads(16) 
 
 tokenizer_vi2en = AutoTokenizer.from_pretrained(
     "vinai/vinai-translate-vi2en-v2",
@@ -365,11 +366,13 @@ class CoopOnlineCrawler(BranchCrawler):
         result = {}
         for city_id, city_info in citys.items():
             result[city_id] = {
+                "id": city_id,
                 "name": city_info["name"],
                 "dsquan": {}
             }
             for district_id, district_name in city_info["dsquan"].items():
                 result[city_id]["dsquan"][district_id] = {
+                    "id": district_id,
                     "name": district_name,
                     "wards": {
                         wid: wname
@@ -437,6 +440,9 @@ class CoopOnlineCrawler(BranchCrawler):
             wards = await vue.evaluate("vm=>vm.wards")
             merged = self._merge_city_ward(citys, wards)
 
+            meta_client = AsyncIOMotorClient("mongodb://103.172.79.235:27017")
+            meta_db = meta_client.metadata_db_v3
+            store_branches = meta_db.store_branches
             store_map = {}
             for city in merged.values():
                 for did, district in city["dsquan"].items():
@@ -463,15 +469,35 @@ class CoopOnlineCrawler(BranchCrawler):
                                 "ward_id": str(wid)
                             }
                         )
-                        print(f"Crawling: {city['name']} – {district['name']} – {district['wards'][wid]}")
+                        # print(f"Crawling: {city['name']} – {district['name']} – {district['wards'][wid]}")
+                        provinceName = city["name"]
+                        # provinceName contain Tinhrh/Thành Phố so please remove
+                        provinceName = provinceName.replace("Tỉnh ", "").replace("Thành phố ", "")
+                        if provinceName == "Thừa Thiên Huế":
+                            provinceName = "Huế"
+                            print(f"Province name: {provinceName}")
+                        districtName = district["name"]
+                        # print(f"Crawling: {provinceName} – {districtName}")
                         stores = self._parse_stores(html, did, did, wid)
-                        # print(f"Crawled stores: {stores}")
-                        for store in stores:
-                            store["store_id"] = store.pop("store_id")
-                            key = (store["store_id"], store["chain"])
-                            store_map[key] = store
 
-                            print(store)
+                        for store in stores:
+                            ## Update store_branches provinceId, distrinctId provinceName districtName by find storelocation
+                            ## to get provinceId please use current city index in array like city [421] = city
+                            provinceId = city["id"]
+                            # print(f"Store provinceId: {provinceId}, districtId: {did}, provinceName: {provinceName}, districtName: {districtName}")
+                            await store_branches.update_one(
+                                {"address": store["storeLocation"]},
+                                {
+                                    "$set": {
+                                        "provinceId": provinceId,
+                                        "districtId": did,
+                                        "provinceName": provinceName,
+                                        "districtName": districtName
+                                    }
+                                },
+                                upsert=True
+                            )
+
 
             api_key = os.environ.get("OPENROUTE_API_KEY")
             for store in store_map.values():
@@ -494,106 +520,4 @@ class CoopOnlineCrawler(BranchCrawler):
         html = await self.page.content()
         soup = BeautifulSoup(html, "html.parser")
         categories = []
-        # Fetch categories by extract from div container-mega then ul megamenu with li class item-vertical with-sub-menu hover
-        category_items = soup.select("li.item-vertical.with-sub-menu.hover")
-
-        for li in category_items:
-            grid_blocks = li.select("div.col-lg-12.col-md-12.col-sm-12")
-            for block in grid_blocks:
-                static_menus = block.select("div.static-menu")
-                for menu in static_menus:
-                    # Lấy thẻ a.main-menu đầu tiên trong menu
-                    a_tag = menu.select_one("a.main-menu")
-                    if a_tag:
-                        categories.append({
-                            "title": a_tag.text.strip(),
-                            "link": a_tag.get("href")
-                        })
-        return categories
-    async def crawl_prices(self) -> List[Dict]:
-        stores = await fetch_branches(self.chain)
-        # print(store_ids)
-        print(f"Found {len(stores)} store IDs in the database.")
-        for store in stores:
-            store_id_str = store.get("store_id")
-            try:
-                store_id = int(store_id_str)
-            except (ValueError, TypeError):
-                print(f"Invalid store_id: {store_id_str} in store {store.get('name')}")
-                continue  # hoặc raise nếu muốn dừng hẳn
-            crawler = CoopOnlineCrawler(store_id=store_id)
-
-            try:
-                await crawler.init()
-                categories = await crawler.fetch_categories()
-                valid_titles = set([
-                    "Nước rửa rau, củ, quả", "Rau Củ", "Trái cây", "Thịt", "Thủy hải sản", "Trứng",
-                    "Bún tươi, bánh canh", "Thức ăn chế biến", "Kem", "Thực phẩm đông lạnh",
-                    "Thực phẩm trữ mát", "Bánh", "Hạt, trái cây sấy", "Kẹo", "Mứt, thạch, rong biển",
-                    "Snack", "Sản phẩm từ sữa khác", "Sữa các loại", "Sữa chua", "Sữa đặc, sữa bột",
-                    "Thức uống có cồn", "Thức uống dinh dưỡng", "Thức uống không cồn", "Dầu ăn",
-                    "Đồ hộp", "Gạo, nếp, đậu, bột", "Gia vị nêm", "Lạp xưởng, xúc xích, khô sấy",
-                    "Ngũ cốc, bánh ăn sáng", "Nui, mì, bún, bánh tráng", "Nước chấm, mắm các loại",
-                    "Thực phẩm ăn liền", "Tương, sốt"
-                    # "Gia vị, gạo, thực phẩm khô",
-                    # "Rau củ, trái cây", "Sữa, sản phẩm từ sữa", "Thịt, trứng, hải sản",
-                    # "Thức ăn chế biến, bún tươi", "Thực phẩm đông, mát", "Thức uống"
-                ])   
-                categories_mapping = {
-                    'Nước rửa rau, củ, quả': 'Prepared Vegetables',
-                    'Rau Củ': 'Vegetables',
-                    'Trái cây': 'Fresh Fruits',
-                    'Thịt': 'Fresh Meat',
-                    'Thủy hải sản': 'Seafood & Fish Balls',
-                    'Trứng': 'Fresh Meat',
-                    'Bún tươi, bánh canh': 'Instant Foods',
-                    'Thức ăn chế biến': 'Instant Foods',
-                    'Kem': 'Ice Cream & Cheese',
-                    'Thực phẩm đông lạnh': 'Instant Foods',
-                    'Thực phẩm trữ mát': 'Instant Foods',
-                    'Bánh': 'Cakes',
-                    'Hạt, trái cây sấy': 'Dried Fruits',
-                    'Kẹo': 'Candies',
-                    'Mứt, thạch, rong biển': 'Fruit Jam',
-                    'Snack': 'Snacks',
-                    'Sản phẩm từ sữa khác': 'Milk',
-                    'Sữa các loại': 'Milk',
-                    'Sữa chua': 'Yogurt',
-                    'Sữa đặc, sữa bột': 'Milk',
-                    'Thức uống có cồn': 'Alcoholic Beverages',
-                    'Thức uống dinh dưỡng': 'Beverages',
-                    'Thức uống không cồn': 'Beverages',
-                    'Dầu ăn': 'Seasonings',
-                    'Đồ hộp': 'Instant Foods',
-                    'Gạo, nếp, đậu, bột': 'Grains & Staples',
-                    'Gia vị nêm': 'Seasonings',
-                    'Lạp xưởng, xúc xích, khô sấy': 'Cold Cuts: Sausages & Ham',
-                    'Ngũ cốc, bánh ăn sáng': 'Cereals & Grains',
-                    'Nui, mì, bún, bánh tráng': 'Instant Foods',
-                    'Nước chấm, mắm các loại': 'Seasonings',
-                    'Thực phẩm ăn liền': 'Instant Foods',
-                    'Tương, sốt': 'Seasonings',
-                    'Gia vị, gạo, thực phẩm khô': 'Grains & Staples',
-                    'Rau củ, trái cây': 'Vegetables',
-                    'Sữa, sản phẩm từ sữa': 'Milk',
-                    'Thịt, trứng, hải sản': 'Fresh Meat',
-                    'Thức ăn chế biến, bún tươi': 'Instant Foods',
-                    'Thực phẩm đông, mát': 'Instant Foods',
-                    'Thức uống': 'Beverages'
-                    }
-
-                for category in categories:
-                    title = category['title']
-                    if title in valid_titles:
-                        category['title'] = categories_mapping.get(title, title)
-                        products = await crawler.fetch_products_by_page(store, category)
-                        print(f"{self.store_id}: {len(products)} products found in category {category['title']}")
-                # print(f"{store_id}: {len(products)} products")
-            except Exception as e:
-                print(f"Failed for store {store_id}:", e)
-            finally:
-                await crawler.close()
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
+        # Fetch categories by extract from div container-mega then ul megamenu with li class item-vertical with-subC
